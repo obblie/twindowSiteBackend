@@ -3,7 +3,6 @@ services:
     name: twindow-license-backend
     env: node
     plan: starter
-    buildCommand: npm install && npm run build
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm run start
     autoDeploy: true
-
