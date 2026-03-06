@@ -6,24 +6,13 @@ dotenv.config();
 const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("production"),
+    APP_ENV: z.string().optional(),
     PORT: z.coerce.number().int().positive().default(10000),
-    LEMON_SQUEEZY_STORE_ID: z.string().min(1),
-    LEMON_SQUEEZY_PRODUCT_ID: z.string().min(1).optional(),
-    LEMON_SQUEEZY_VARIANT_ID: z.string().min(1).optional(),
-    LEMON_SQUEEZY_API_KEY: z.string().min(1).optional(),
+    LEMON_SQUEEZY_API_KEY: z.string().min(1),
+    LEMON_API_BASE_URL: z.string().url().default("https://api.lemonsqueezy.com/v1"),
     LEMON_SQUEEZY_WEBHOOK_SIGNING_SECRET: z.string().min(1).optional(),
-    LICENSE_VALIDATION_INTERVAL_SECONDS: z.coerce.number().int().positive().default(86400),
     LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
     CORS_ORIGIN: z.string().optional()
-  })
-  .superRefine((value, ctx) => {
-    if (!value.LEMON_SQUEEZY_PRODUCT_ID && !value.LEMON_SQUEEZY_VARIANT_ID) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["LEMON_SQUEEZY_PRODUCT_ID"],
-        message: "Either LEMON_SQUEEZY_PRODUCT_ID or LEMON_SQUEEZY_VARIANT_ID is required"
-      });
-    }
   });
 
 const parsed = envSchema.safeParse(process.env);
@@ -41,4 +30,3 @@ export const env = {
   ...parsed.data,
   CORS_ORIGINS: corsOrigins
 };
-

@@ -6,48 +6,18 @@ Backend-only Node service for desktop app license lifecycle with Lemon Squeezy.
 
 - `POST /api/license/activate`
 - `POST /api/license/validate`
-- `POST /api/license/deactivate`
+- `POST /api/license/deactivate` (optional in app flow)
 - `POST /api/webhooks/lemon-squeezy` (optional)
 - `GET /health`
 
-## Stable response contract
-
-Success:
-
-```json
-{
-  "ok": true,
-  "license": {
-    "status": "active",
-    "instanceId": "12345",
-    "entitlements": { "premium": true },
-    "nextCheckAt": "2026-03-07T02:00:00.000Z"
-  },
-  "error": null
-}
-```
-
-Failure:
-
-```json
-{
-  "ok": false,
-  "license": null,
-  "error": {
-    "code": "INVALID_LICENSE",
-    "message": "License is invalid"
-  }
-}
-```
-
-## Request examples
+## Request payloads
 
 Activate:
 
 ```json
 {
-  "licenseKey": "XXXX-XXXX-XXXX-XXXX",
-  "instanceName": "MacBook-Pro-Home"
+  "license_key": "XXXX-XXXX-XXXX-XXXX",
+  "machine_fingerprint": "sha256-hash"
 }
 ```
 
@@ -55,8 +25,9 @@ Validate:
 
 ```json
 {
-  "licenseKey": "XXXX-XXXX-XXXX-XXXX",
-  "instanceId": "12345"
+  "license_key": "XXXX-XXXX-XXXX-XXXX",
+  "machine_fingerprint": "sha256-hash",
+  "instance_id": "12345"
 }
 ```
 
@@ -64,8 +35,40 @@ Deactivate:
 
 ```json
 {
-  "licenseKey": "XXXX-XXXX-XXXX-XXXX",
-  "instanceId": "12345"
+  "license_key": "XXXX-XXXX-XXXX-XXXX",
+  "machine_fingerprint": "sha256-hash",
+  "instance_id": "12345"
+}
+```
+
+## Response contracts
+
+Activate/Validate:
+
+```json
+{
+  "active": true,
+  "tier": "premium",
+  "instanceID": "12345",
+  "expiresAt": null,
+  "message": null
+}
+```
+
+Deactivate:
+
+```json
+{
+  "deactivated": true,
+  "message": null
+}
+```
+
+Failure (`400`, `502`, `500`):
+
+```json
+{
+  "message": "human readable safe error"
 }
 ```
 
@@ -75,13 +78,14 @@ Copy `.env.example` to `.env` and fill values.
 
 Required:
 
-- `LEMON_SQUEEZY_STORE_ID`
-- `LEMON_SQUEEZY_PRODUCT_ID` or `LEMON_SQUEEZY_VARIANT_ID`
+- `LEMON_SQUEEZY_API_KEY`
 
 Optional:
 
-- `LEMON_SQUEEZY_API_KEY`
+- `LEMON_API_BASE_URL` (default `https://api.lemonsqueezy.com/v1`)
 - `LEMON_SQUEEZY_WEBHOOK_SIGNING_SECRET`
+- `APP_ENV`
+- `LOG_LEVEL`
 - `CORS_ORIGIN`
 
 ## Scripts
@@ -98,3 +102,4 @@ Web Service settings:
 - Build Command: `npm install --include=dev && npm run build`
 - Start Command: `npm run start`
 - Port: `10000` (or Render-injected `PORT`)
+

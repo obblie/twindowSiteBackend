@@ -1,9 +1,7 @@
 import crypto from "node:crypto";
 import { env } from "../config/env.js";
 import { AppError } from "../lib/errors.js";
-import type { LicenseSnapshot, LicenseStatus } from "../types/license.js";
-
-const LEMON_LICENSE_API_BASE = "https://api.lemonsqueezy.com/v1/licenses";
+import type { LicenseDeactivateResponse, LicenseStatusResponse } from "../types/license.js";
 
 type LemonLicenseAction = "activate" | "validate" | "deactivate";
 
@@ -11,9 +9,6 @@ type LemonPayload = {
   license_key: string;
   instance_name?: string;
   instance_id?: string;
-  store_id: string;
-  product_id?: string;
-  variant_id?: string;
 };
 
 type LemonRawResponse = {
@@ -21,50 +16,27 @@ type LemonRawResponse = {
   valid?: boolean;
   deactivated?: boolean;
   error?: string | null;
+  message?: string | null;
   instance?: {
     id?: string | number | null;
   } | null;
-  meta?: {
-    test_mode?: boolean;
-  };
+  instance_id?: string | number | null;
+  license_key?: {
+    expires_at?: string | null;
+  } | null;
+  expires_at?: string | null;
   [key: string]: unknown;
 };
 
-function computeNextCheckAt(): string {
-  return new Date(Date.now() + env.LICENSE_VALIDATION_INTERVAL_SECONDS * 1000).toISOString();
-}
-
-function deriveStatus(action: LemonLicenseAction, raw: LemonRawResponse): LicenseStatus {
-  if (action === "deactivate") {
-    return raw.deactivated ? "inactive" : "invalid";
-  }
-
-  if (raw.valid === true || raw.activated === true) {
-    return "active";
-  }
-
-  return "invalid";
-}
-
-function mapErrorCode(action: LemonLicenseAction, upstreamError?: string | null): AppError {
-  if (!upstreamError) {
-    if (action === "activate") {
-      return new AppError("ACTIVATION_FAILED", "License activation failed", 422);
+type LemonCallResult =
+  | {
+      kind: "ok";
+      raw: LemonRawResponse;
     }
-    return new AppError("INVALID_LICENSE", "License is invalid", 422);
-  }
-
-  const normalized = upstreamError.toLowerCase();
-  if (normalized.includes("invalid") || normalized.includes("not found")) {
-    return new AppError("INVALID_LICENSE", "License is invalid", 422);
-  }
-
-  if (action === "activate") {
-    return new AppError("ACTIVATION_FAILED", "License activation failed", 422);
-  }
-
-  return new AppError("UPSTREAM_UNAVAILABLE", "License provider unavailable", 503);
-}
+  | {
+      kind: "invalid";
+      message: string;
+    };
 
 function sanitizeInstanceId(value: unknown): string | null {
   if (value === null || value === undefined) {
@@ -73,7 +45,48 @@ function sanitizeInstanceId(value: unknown): string | null {
   return String(value);
 }
 
-async function lemonRequest(action: LemonLicenseAction, payload: LemonPayload): Promise<LemonRawResponse> {
+function safeIsoOrNull(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) {
+    return null;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return date.toISOString();
+}
+
+function extractExpiresAt(raw: LemonRawResponse): string | null {
+  return safeIsoOrNull(raw.license_key?.expires_at ?? raw.expires_at ?? null);
+}
+
+function normalizeInvalidLicenseError(text: string): boolean {
+  const value = text.toLowerCase();
+  return (
+    value.includes("invalid") ||
+    value.includes("not found") ||
+    value.includes("unable to find") ||
+    value.includes("does not exist")
+  );
+}
+
+function extractUpstreamMessage(json: unknown): string | null {
+  if (!json || typeof json !== "object") {
+    return null;
+  }
+
+  const data = json as Record<string, unknown>;
+  if (typeof data.error === "string" && data.error.trim()) {
+    return data.error.trim();
+  }
+  if (typeof data.message === "string" && data.message.trim()) {
+    return data.message.trim();
+  }
+
+  return null;
+}
+
+async function lemonRequest(action: LemonLicenseAction, payload: LemonPayload): Promise<LemonCallResult> {
   const body = new URLSearchParams();
   Object.entries(payload).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") {
@@ -83,79 +96,108 @@ async function lemonRequest(action: LemonLicenseAction, payload: LemonPayload): 
 
   let response: Response;
   try {
-    response = await fetch(`${LEMON_LICENSE_API_BASE}/${action}`, {
+    response = await fetch(`${env.LEMON_API_BASE_URL}/licenses/${action}`, {
       method: "POST",
       headers: {
+        Authorization: `Bearer ${env.LEMON_SQUEEZY_API_KEY}`,
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json"
       },
       body
     });
   } catch (_error) {
-    throw new AppError("UPSTREAM_UNAVAILABLE", "License provider unavailable", 503);
+    throw new AppError("UPSTREAM_UNAVAILABLE", "License provider unavailable", 502);
   }
 
-  let json: LemonRawResponse;
+  let json: unknown;
   try {
-    json = (await response.json()) as LemonRawResponse;
+    json = await response.json();
   } catch (_error) {
-    throw new AppError("UPSTREAM_UNAVAILABLE", "License provider unavailable", 503);
+    throw new AppError("UPSTREAM_UNAVAILABLE", "License provider unavailable", 502);
   }
 
-  if (!response.ok) {
-    throw mapErrorCode(action, json.error);
+  const upstreamMessage = extractUpstreamMessage(json);
+  if (!response.ok || upstreamMessage) {
+    if (upstreamMessage && normalizeInvalidLicenseError(upstreamMessage)) {
+      return { kind: "invalid", message: "License is invalid" };
+    }
+    throw new AppError("UPSTREAM_UNAVAILABLE", "License provider unavailable", 502);
   }
 
-  if (json.error) {
-    throw mapErrorCode(action, json.error);
-  }
-
-  return json;
+  return { kind: "ok", raw: json as LemonRawResponse };
 }
 
-function toLicenseSnapshot(action: LemonLicenseAction, raw: LemonRawResponse): LicenseSnapshot {
-  const status = deriveStatus(action, raw);
+function toStatusResponse(result: LemonCallResult, action: "activate" | "validate"): LicenseStatusResponse {
+  if (result.kind === "invalid") {
+    return {
+      active: false,
+      tier: "free",
+      instanceID: null,
+      expiresAt: null,
+      message: result.message
+    };
+  }
+
+  const active = action === "activate" ? result.raw.activated === true : result.raw.valid === true;
   return {
-    status,
-    instanceId: sanitizeInstanceId(raw.instance?.id),
-    entitlements: {
-      premium: status === "active"
-    },
-    nextCheckAt: computeNextCheckAt()
+    active,
+    tier: active ? "premium" : "free",
+    instanceID: sanitizeInstanceId(result.raw.instance?.id ?? result.raw.instance_id ?? null),
+    expiresAt: extractExpiresAt(result.raw),
+    message: active ? null : "License is not active"
   };
 }
 
-function basePayload(licenseKey: string): Pick<LemonPayload, "license_key" | "store_id" | "product_id" | "variant_id"> {
+function toDeactivateResponse(result: LemonCallResult): LicenseDeactivateResponse {
+  if (result.kind === "invalid") {
+    return {
+      deactivated: false,
+      message: result.message
+    };
+  }
+
+  const deactivated = result.raw.deactivated === true;
   return {
-    license_key: licenseKey,
-    store_id: env.LEMON_SQUEEZY_STORE_ID,
-    product_id: env.LEMON_SQUEEZY_PRODUCT_ID,
-    variant_id: env.LEMON_SQUEEZY_VARIANT_ID
+    deactivated,
+    message: deactivated ? null : "License was not deactivated"
   };
 }
 
-export async function activateLicense(input: { licenseKey: string; instanceName: string }): Promise<LicenseSnapshot> {
-  const raw = await lemonRequest("activate", {
-    ...basePayload(input.licenseKey),
-    instance_name: input.instanceName
+export async function activateLicense(input: {
+  license_key: string;
+  machine_fingerprint: string;
+}): Promise<LicenseStatusResponse> {
+  const result = await lemonRequest("activate", {
+    license_key: input.license_key,
+    instance_name: input.machine_fingerprint
   });
-  return toLicenseSnapshot("activate", raw);
+  return toStatusResponse(result, "activate");
 }
 
-export async function validateLicense(input: { licenseKey: string; instanceId?: string }): Promise<LicenseSnapshot> {
-  const raw = await lemonRequest("validate", {
-    ...basePayload(input.licenseKey),
-    instance_id: input.instanceId
+export async function validateLicense(input: {
+  license_key: string;
+  machine_fingerprint: string;
+  instance_id?: string;
+}): Promise<LicenseStatusResponse> {
+  const result = await lemonRequest("validate", {
+    license_key: input.license_key,
+    instance_name: input.machine_fingerprint,
+    instance_id: input.instance_id
   });
-  return toLicenseSnapshot("validate", raw);
+  return toStatusResponse(result, "validate");
 }
 
-export async function deactivateLicense(input: { licenseKey: string; instanceId: string }): Promise<LicenseSnapshot> {
-  const raw = await lemonRequest("deactivate", {
-    ...basePayload(input.licenseKey),
-    instance_id: input.instanceId
+export async function deactivateLicense(input: {
+  license_key: string;
+  machine_fingerprint: string;
+  instance_id?: string;
+}): Promise<LicenseDeactivateResponse> {
+  const result = await lemonRequest("deactivate", {
+    license_key: input.license_key,
+    instance_name: input.machine_fingerprint,
+    instance_id: input.instance_id
   });
-  return toLicenseSnapshot("deactivate", raw);
+  return toDeactivateResponse(result);
 }
 
 export function verifyWebhookSignature(rawBody: string, signature: string | undefined): boolean {
